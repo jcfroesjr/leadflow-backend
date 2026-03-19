@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import webhook, leads
+from app.routers import webhook, leads, configuracoes
 
 app = FastAPI(title="LeadFlow API", version="1.0.0")
 
@@ -14,6 +14,7 @@ app.add_middleware(
 
 app.include_router(webhook.router)
 app.include_router(leads.router)
+app.include_router(configuracoes.router)
 
 @app.get("/health")
 async def health():
