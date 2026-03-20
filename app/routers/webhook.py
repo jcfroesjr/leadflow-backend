@@ -45,12 +45,21 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
         telefone = payload.get(mapa.get("telefone", "telefone"), payload.get("telefone", ""))
         email    = payload.get(mapa.get("email",    "email"),    payload.get("email",    ""))
 
-        # Salva lead
+        # Lê score do payload (campo "score" ou mapeado)
+        campo_score = mapa.get("score", "score")
+        score_raw   = payload.get(campo_score, payload.get("score", 0))
+        try:
+            score = int(float(str(score_raw)))
+        except (ValueError, TypeError):
+            score = 0
+
+        # Salva lead com score
         sb.table("leads").insert({
             "empresa_id": empresa_id,
             "nome":       nome,
             "telefone":   telefone,
             "email":      email,
+            "score":      score,
             "origem":     wh.get("plataforma", "webhook"),
             "status":     "pendente",
             "dados_raw":  payload,
@@ -66,18 +75,29 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
             config_apis = empresa.get("config_apis") or {}
             config_ia   = empresa.get("config_ia") or {}
 
-            evo_url      = config_apis.get("evolution_url") or EVOLUTION_URL_ENV
-            evo_key      = config_apis.get("evolution_key") or EVOLUTION_KEY_ENV
+            # Verifica score mínimo — agente só é acionado se score >= score_minimo
+            score_minimo = int(config_ia.get("score_minimo", 10000))
+            agente_ativo = score >= score_minimo
+
+            evo_url       = config_apis.get("evolution_url") or EVOLUTION_URL_ENV
+            evo_key       = config_apis.get("evolution_key") or EVOLUTION_KEY_ENV
             evo_instancia = empresa.get("evolution_instancia") or config_apis.get("evolution_instancia", "")
 
             if evo_url and evo_key and evo_instancia:
-                nome_display      = nome or "cliente"
-                mensagem_inicial  = config_ia.get("mensagem_inicial") or \
-                    f"Olá {nome_display}! 👋 Recebemos seu contato e nossa equipe entrará em contato em breve."
+                nome_display = nome or "cliente"
 
-                await enviar_mensagem(evo_url, evo_key, evo_instancia, telefone, mensagem_inicial)
+                if agente_ativo:
+                    # Score suficiente: agente IA responde
+                    mensagem = config_ia.get("mensagem_inicial") or \
+                        f"Olá {nome_display}! 👋 Recebemos seu contato e nossa equipe entrará em contato em breve."
+                else:
+                    # Score abaixo do mínimo: mensagem padrão sem agente
+                    mensagem = config_ia.get("mensagem_score_baixo") or \
+                        f"Olá {nome_display}! Recebemos seu contato. Em breve retornaremos."
 
-        return {"ok": True}
+                await enviar_mensagem(evo_url, evo_key, evo_instancia, telefone, mensagem)
+
+        return {"ok": True, "score": score, "agente_acionado": agente_ativo if empresa_res.data else False}
 
     except Exception as e:
         return JSONResponse({"ok": False, "erro": str(e)}, status_code=500)
