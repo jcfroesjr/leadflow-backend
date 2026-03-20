@@ -3,7 +3,8 @@ import os
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from app.db.client import get_supabase
-from app.services.evolution import enviar_mensagem
+from app.services.evolution import enviar_mensagem, enviar_documento
+from app.services.pdf_generator import gerar_pdf_lead
 
 router = APIRouter(tags=["webhook"])
 
@@ -67,37 +68,77 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
 
         # Busca configurações de Evolution e IA da empresa
         empresa_res = sb.table("empresas") \
-            .select("evolution_instancia, config_apis, config_ia") \
+            .select("nome, evolution_instancia, config_apis, config_ia") \
             .eq("id", empresa_id).limit(1).execute()
 
-        if empresa_res.data and telefone:
-            empresa     = empresa_res.data[0]
-            config_apis = empresa.get("config_apis") or {}
-            config_ia   = empresa.get("config_ia") or {}
+        agente_ativo = False
 
-            # Verifica score mínimo — agente só é acionado se score >= score_minimo
-            score_minimo = int(config_ia.get("score_minimo", 10000))
-            agente_ativo = score >= score_minimo
+        if empresa_res.data:
+            empresa      = empresa_res.data[0]
+            empresa_nome = empresa.get("nome", "")
+            config_apis  = empresa.get("config_apis") or {}
+            config_ia    = empresa.get("config_ia") or {}
 
             evo_url       = config_apis.get("evolution_url") or EVOLUTION_URL_ENV
             evo_key       = config_apis.get("evolution_key") or EVOLUTION_KEY_ENV
             evo_instancia = empresa.get("evolution_instancia") or config_apis.get("evolution_instancia", "")
 
-            if evo_url and evo_key and evo_instancia:
-                nome_display = nome or "cliente"
+            # ── Notificações internas para equipe ────────────────────────────
+            telefones_notif = config_apis.get("notificacoes_telefones") or []
+            if telefones_notif and evo_url and evo_key and evo_instancia:
+                score_fmt = f"{score:,}".replace(",", ".")
+                texto_notif = (
+                    f"🔔 *Novo lead recebido!*\n\n"
+                    f"👤 *Nome:* {nome or '—'}\n"
+                    f"📱 *Telefone:* {telefone or '—'}\n"
+                    f"📧 *E-mail:* {email or '—'}\n"
+                    f"⭐ *Score:* {score_fmt}\n"
+                    f"📋 *Origem:* {wh.get('plataforma', 'webhook')}"
+                )
 
-                if agente_ativo:
-                    # Score suficiente: agente IA responde
-                    mensagem = config_ia.get("mensagem_inicial") or \
-                        f"Olá {nome_display}! 👋 Recebemos seu contato e nossa equipe entrará em contato em breve."
-                else:
-                    # Score abaixo do mínimo: mensagem padrão sem agente
-                    mensagem = config_ia.get("mensagem_score_baixo") or \
-                        f"Olá {nome_display}! Recebemos seu contato. Em breve retornaremos."
+                # Gera PDF com todos os dados do webhook
+                pdf_b64 = gerar_pdf_lead(
+                    nome=nome,
+                    telefone=telefone,
+                    email=email,
+                    score=score,
+                    payload=payload,
+                    mapeamento=mapa,
+                    empresa_nome=empresa_nome,
+                )
+                nome_arquivo = f"lead_{(nome or 'desconhecido').replace(' ', '_')}.pdf"
 
-                await enviar_mensagem(evo_url, evo_key, evo_instancia, telefone, mensagem)
+                for tel in telefones_notif:
+                    tel = str(tel).strip()
+                    if not tel:
+                        continue
+                    # 1. Mensagem de texto com resumo
+                    await enviar_mensagem(evo_url, evo_key, evo_instancia, tel, texto_notif)
+                    # 2. PDF com respostas completas
+                    await enviar_documento(
+                        evo_url, evo_key, evo_instancia, tel,
+                        pdf_b64, nome_arquivo,
+                        caption="📎 Respostas completas do formulário",
+                    )
 
-        return {"ok": True, "score": score, "agente_acionado": agente_ativo if empresa_res.data else False}
+            # ── Mensagem para o lead ──────────────────────────────────────────
+            if telefone:
+                score_minimo = int(config_ia.get("score_minimo", 10000))
+                agente_ativo = score >= score_minimo
+
+                if evo_url and evo_key and evo_instancia:
+                    nome_display = nome or "cliente"
+
+                    if agente_ativo:
+                        mensagem = config_ia.get("mensagem_inicial") or \
+                            f"Olá {nome_display}! 👋 Recebemos seu contato e nossa equipe entrará em contato em breve."
+                    else:
+                        mensagem = config_ia.get("mensagem_score_baixo") or \
+                            f"Olá {nome_display}! Recebemos seu contato. Em breve retornaremos."
+
+                    await enviar_mensagem(evo_url, evo_key, evo_instancia, telefone, mensagem)
+
+        return {"ok": True, "score": score, "agente_acionado": agente_ativo}
 
     except Exception as e:
         return JSONResponse({"ok": False, "erro": str(e)}, status_code=500)

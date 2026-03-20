@@ -1,4 +1,5 @@
 fastapi==0.115.0
+fpdf2==2.7.9
 uvicorn[standard]==0.30.0
 pydantic==2.8.0
 supabase==2.7.0
