@@ -1,13 +1,20 @@
 import json
+import os
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from app.db.client import get_supabase
+from app.services.evolution import enviar_mensagem
 
 router = APIRouter(tags=["webhook"])
 
+# Fallback para variáveis de ambiente (caso não configurado por empresa)
+EVOLUTION_URL_ENV = os.getenv("EVOLUTION_API_URL", "").rstrip("/")
+EVOLUTION_KEY_ENV = os.getenv("EVOLUTION_API_KEY", "")
+
+
 @router.post("/webhook/{empresa_id}/{token}")
 async def receber_webhook(empresa_id: str, token: str, request: Request):
-    # Lê o body raw e tenta decodificar com UTF-8, fallback para latin-1
+    # Lê body com suporte a UTF-8 e Latin-1
     try:
         body = await request.body()
         try:
@@ -20,23 +27,25 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
     try:
         sb = get_supabase()
 
+        # Valida webhook
         result = sb.table("webhooks").select("*") \
             .eq("empresa_id", empresa_id) \
             .eq("token", token) \
             .eq("ativo", True) \
-            .limit(1) \
-            .execute()
+            .limit(1).execute()
 
         if not result.data:
             return {"ok": False, "erro": "Webhook não encontrado"}
 
         wh = result.data[0]
 
+        # Mapeia campos usando mapeamento configurado
         mapa     = wh.get("mapeamento_campos") or {}
         nome     = payload.get(mapa.get("nome",     "nome"),     payload.get("nome",     ""))
         telefone = payload.get(mapa.get("telefone", "telefone"), payload.get("telefone", ""))
         email    = payload.get(mapa.get("email",    "email"),    payload.get("email",    ""))
 
+        # Salva lead
         sb.table("leads").insert({
             "empresa_id": empresa_id,
             "nome":       nome,
@@ -47,7 +56,47 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
             "dados_raw":  payload,
         }).execute()
 
+        # Busca configurações de Evolution e IA da empresa
+        empresa_res = sb.table("empresas") \
+            .select("evolution_instancia, config_apis, config_ia") \
+            .eq("id", empresa_id).limit(1).execute()
+
+        if empresa_res.data and telefone:
+            empresa     = empresa_res.data[0]
+            config_apis = empresa.get("config_apis") or {}
+            config_ia   = empresa.get("config_ia") or {}
+
+            evo_url      = config_apis.get("evolution_url") or EVOLUTION_URL_ENV
+            evo_key      = config_apis.get("evolution_key") or EVOLUTION_KEY_ENV
+            evo_instancia = empresa.get("evolution_instancia") or config_apis.get("evolution_instancia", "")
+
+            if evo_url and evo_key and evo_instancia:
+                nome_display      = nome or "cliente"
+                mensagem_inicial  = config_ia.get("mensagem_inicial") or \
+                    f"Olá {nome_display}! 👋 Recebemos seu contato e nossa equipe entrará em contato em breve."
+
+                await enviar_mensagem(evo_url, evo_key, evo_instancia, telefone, mensagem_inicial)
+
         return {"ok": True}
 
     except Exception as e:
         return JSONResponse({"ok": False, "erro": str(e)}, status_code=500)
+
+
+@router.post("/teste/whatsapp")
+async def testar_whatsapp(body: dict):
+    """
+    Endpoint para testar envio de mensagem WhatsApp diretamente.
+    Body: { "numero": "5521...", "mensagem": "...", "instancia": "...", "evo_url": "...", "evo_key": "..." }
+    """
+    numero    = body.get("numero", "")
+    mensagem  = body.get("mensagem", "Teste de mensagem do Leadflow!")
+    instancia = body.get("instancia") or os.getenv("EVOLUTION_INSTANCIA", "")
+    evo_url   = body.get("evo_url") or EVOLUTION_URL_ENV
+    evo_key   = body.get("evo_key") or EVOLUTION_KEY_ENV
+
+    if not all([numero, instancia, evo_url, evo_key]):
+        return JSONResponse({"ok": False, "erro": "Campos obrigatórios: numero, instancia, evo_url, evo_key"}, status_code=400)
+
+    resultado = await enviar_mensagem(evo_url, evo_key, instancia, numero, mensagem)
+    return resultado
