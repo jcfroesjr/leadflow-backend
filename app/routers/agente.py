@@ -16,6 +16,126 @@ from app.services.google_calendar import criar_evento_calendar, buscar_horarios_
 router = APIRouter(tags=["agente"])
 
 
+async def _gerar_resposta_openai_com_agenda(
+    modelo: str,
+    api_key: str,
+    system_prompt: str,
+    mensagem: str,
+    temperatura: float,
+    max_tokens: int,
+    calendar_creds: dict,
+    calendar_id: str,
+    fuso: str,
+    lead: dict,
+) -> str:
+    """Chama OpenAI com function calling para agendamento no Google Agenda."""
+    import asyncio
+    import os
+    from openai import AsyncOpenAI
+
+    key = api_key or os.getenv("OPENAI_API_KEY", "")
+    client = AsyncOpenAI(api_key=key)
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "buscar_horarios_livres",
+                "description": "Consulta o Google Agenda e retorna horários reais disponíveis. Use ANTES de sugerir horários ao lead.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dias": {"type": "integer", "description": "Quantos dias à frente verificar (padrão 2)"}
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "criar_agendamento",
+                "description": "Cria agendamento no Google Agenda quando lead confirmar data e hora.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "titulo":          {"type": "string",  "description": "Título do evento"},
+                        "data":            {"type": "string",  "description": "Data no formato YYYY-MM-DD"},
+                        "hora_inicio":     {"type": "string",  "description": "Hora de início no formato HH:MM"},
+                        "duracao_minutos": {"type": "integer", "description": "Duração em minutos (padrão 60)"},
+                        "descricao":       {"type": "string",  "description": "Descrição com dados do lead"},
+                    },
+                    "required": ["titulo", "data", "hora_inicio"],
+                },
+            },
+        },
+    ]
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": mensagem},
+    ]
+
+    for _ in range(6):
+        resp = await client.chat.completions.create(
+            model=modelo,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=temperatura,
+            max_tokens=max_tokens,
+        )
+
+        msg = resp.choices[0].message
+        tool_calls = msg.tool_calls
+
+        if not tool_calls:
+            return msg.content or ""
+
+        messages.append({"role": "assistant", "content": msg.content, "tool_calls": [
+            {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+            for tc in tool_calls
+        ]})
+
+        for tc in tool_calls:
+            import json as _json
+            args = _json.loads(tc.function.arguments or "{}")
+            try:
+                if tc.function.name == "buscar_horarios_livres":
+                    slots = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: buscar_horarios_livres(
+                            credentials_dict=calendar_creds,
+                            calendar_id=calendar_id,
+                            fuso=fuso,
+                            dias=int(args.get("dias", 2)),
+                        )
+                    )
+                    fn_result = f"Horários livres: {', '.join(slots)}" if slots else "Nenhum horário livre nos próximos dias."
+                elif tc.function.name == "criar_agendamento":
+                    resultado = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: criar_evento_calendar(
+                            credentials_dict=calendar_creds,
+                            calendar_id=calendar_id,
+                            titulo=args.get("titulo", f"Sessão Estratégica — {lead.get('nome', '')}"),
+                            data=args["data"],
+                            hora_inicio=args["hora_inicio"],
+                            duracao_minutos=int(args.get("duracao_minutos", 60)),
+                            descricao=args.get("descricao", ""),
+                            fuso=fuso,
+                        )
+                    )
+                    fn_result = f"Agendamento criado! Link: {resultado['link']}"
+                else:
+                    fn_result = "Função não reconhecida."
+            except Exception as e:
+                fn_result = f"Erro: {str(e)}"
+
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": fn_result})
+
+    return ""
+
+
 async def _gerar_resposta_gemini_com_agenda(
     modelo: str,
     api_key: str,
@@ -300,7 +420,20 @@ async def receber_mensagem_evolution(request: Request):
     # Gera resposta — Gemini com function calling se agenda configurada
     resposta = ""
     try:
-        if prov == "gemini" and calendar_creds:
+        if prov == "openai" and calendar_creds:
+            resposta = await _gerar_resposta_openai_com_agenda(
+                modelo=modelo,
+                api_key=api_key,
+                system_prompt=prompt_sistema,
+                mensagem=mensagem_llm,
+                temperatura=float(config_ia.get("temperatura", 0.7)),
+                max_tokens=int(config_ia.get("max_tokens", 800)),
+                calendar_creds=calendar_creds,
+                calendar_id=calendar_id,
+                fuso=fuso,
+                lead=lead,
+            )
+        elif prov == "gemini" and calendar_creds:
             resposta = await _gerar_resposta_gemini_com_agenda(
                 modelo=modelo,
                 api_key=api_key,
