@@ -1,6 +1,7 @@
 """
 Router do Agente IA — recebe mensagens do WhatsApp via Evolution API
 e responde usando LLM configurado pela empresa.
+Suporta function calling para agendamento no Google Agenda (Gemini).
 """
 import json
 import re
@@ -10,8 +11,116 @@ from fastapi.responses import JSONResponse
 from app.db.client import get_supabase
 from app.services.evolution import enviar_mensagem
 from app.services.llm import gerar_resposta
+from app.services.google_calendar import criar_evento
 
 router = APIRouter(tags=["agente"])
+
+
+async def _gerar_resposta_gemini_com_agenda(
+    modelo: str,
+    api_key: str,
+    system_prompt: str,
+    mensagem: str,
+    temperatura: float,
+    max_tokens: int,
+    calendar_creds: dict,
+    calendar_id: str,
+    fuso: str,
+    lead: dict,
+) -> str:
+    """Chama Gemini com function calling para agendamento no Google Agenda."""
+    from google import genai
+    from google.genai import types
+    import asyncio
+
+    key = api_key or __import__("os").getenv("GEMINI_API_KEY", "")
+    client = genai.Client(api_key=key)
+
+    tool_agenda = types.Tool(function_declarations=[
+        types.FunctionDeclaration(
+            name="criar_agendamento",
+            description=(
+                "Cria um agendamento no Google Agenda quando o lead confirmar data e hora. "
+                "Use apenas quando tiver data E hora confirmadas pelo lead."
+            ),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "titulo":           types.Schema(type=types.Type.STRING,  description="Título do evento, ex: 'Sessão Estratégica — João Silva'"),
+                    "data":             types.Schema(type=types.Type.STRING,  description="Data no formato YYYY-MM-DD"),
+                    "hora_inicio":      types.Schema(type=types.Type.STRING,  description="Hora de início no formato HH:MM"),
+                    "duracao_minutos":  types.Schema(type=types.Type.INTEGER, description="Duração em minutos (padrão 60)"),
+                    "descricao":        types.Schema(type=types.Type.STRING,  description="Descrição com dados do lead"),
+                },
+                required=["titulo", "data", "hora_inicio"],
+            ),
+        )
+    ])
+
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        temperature=temperatura,
+        max_output_tokens=max_tokens,
+        tools=[tool_agenda],
+    )
+
+    resp = await client.aio.models.generate_content(
+        model=modelo,
+        contents=mensagem,
+        config=config,
+    )
+
+    # Verifica se Gemini quer chamar a função
+    candidate = resp.candidates[0] if resp.candidates else None
+    if not candidate:
+        return resp.text or ""
+
+    for part in candidate.content.parts:
+        if part.function_call:
+            fc = part.function_call
+            args = dict(fc.args)
+
+            # Executa o agendamento em thread (biblioteca síncrona)
+            try:
+                resultado = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: criar_evento(
+                        credentials_dict=calendar_creds,
+                        calendar_id=calendar_id,
+                        titulo=args.get("titulo", f"Reunião — {lead.get('nome', '')}"),
+                        data=args["data"],
+                        hora_inicio=args["hora_inicio"],
+                        duracao_minutos=int(args.get("duracao_minutos", 60)),
+                        descricao=args.get("descricao", ""),
+                        fuso=fuso,
+                    )
+                )
+                fn_result = f"Agendamento criado com sucesso! Link: {resultado['link']}"
+            except Exception as e:
+                fn_result = f"Erro ao criar agendamento: {str(e)}"
+
+            # Envia resultado da função de volta ao Gemini para resposta final
+            resp2 = await client.aio.models.generate_content(
+                model=modelo,
+                contents=[
+                    types.Content(role="user", parts=[types.Part(text=mensagem)]),
+                    types.Content(role="model", parts=[types.Part(function_call=part.function_call)]),
+                    types.Content(role="user", parts=[
+                        types.Part(function_response=types.FunctionResponse(
+                            name=fc.name,
+                            response={"result": fn_result},
+                        ))
+                    ]),
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=temperatura,
+                    max_output_tokens=max_tokens,
+                ),
+            )
+            return resp2.text or fn_result
+
+    return resp.text or ""
 
 
 def _limpar_numero(numero: str) -> str:
@@ -156,16 +265,36 @@ async def receber_mensagem_evolution(request: Request):
     prov = provider or ("gemini" if modelo.startswith("gemini") else "anthropic" if modelo.startswith("claude") else "openai")
     api_key = provider_map.get(prov, "")
 
-    # Gera resposta via LLM
-    resposta = await gerar_resposta(
-        modelo=modelo,
-        system_prompt=prompt_sistema,
-        mensagem=mensagem_llm,
-        api_key=api_key,
-        temperatura=float(config_ia.get("temperatura", 0.7)),
-        max_tokens=int(config_ia.get("max_tokens", 500)),
-        provider=prov,
-    )
+    # Configurações do Google Agenda
+    calendar_creds = config_apis.get("google_calendar_credentials")
+    calendar_id    = config_apis.get("google_calendar_id", "primary")
+    fuso           = empresa.get("fuso") or "America/Sao_Paulo"
+
+    # Gera resposta — Gemini com function calling se agenda configurada
+    resposta = ""
+    if prov == "gemini" and calendar_creds:
+        resposta = await _gerar_resposta_gemini_com_agenda(
+            modelo=modelo,
+            api_key=api_key,
+            system_prompt=prompt_sistema,
+            mensagem=mensagem_llm,
+            temperatura=float(config_ia.get("temperatura", 0.7)),
+            max_tokens=int(config_ia.get("max_tokens", 500)),
+            calendar_creds=calendar_creds,
+            calendar_id=calendar_id,
+            fuso=fuso,
+            lead=lead,
+        )
+    else:
+        resposta = await gerar_resposta(
+            modelo=modelo,
+            system_prompt=prompt_sistema,
+            mensagem=mensagem_llm,
+            api_key=api_key,
+            temperatura=float(config_ia.get("temperatura", 0.7)),
+            max_tokens=int(config_ia.get("max_tokens", 500)),
+            provider=prov,
+        )
 
     # Salva mensagens no histórico
     agora = datetime.utcnow().isoformat()
