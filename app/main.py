@@ -1,8 +1,17 @@
-from fastapi import FastAPI
+import traceback
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from app.routers import webhook, leads, configuracoes, agente, agenda
 
 app = FastAPI(title="LeadFlow API", version="1.0.0")
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"ok": False, "erro": str(exc), "trace": traceback.format_exc()},
+    )
 
 app.add_middleware(
     CORSMiddleware,
