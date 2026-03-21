@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from app.db.client import get_supabase
 from app.services.evolution import enviar_mensagem
 from app.services.llm import gerar_resposta
-from app.services.google_calendar import criar_evento
+from app.services.google_calendar import criar_evento_calendar, buscar_horarios_livres
 
 router = APIRouter(tags=["agente"])
 
@@ -38,6 +38,20 @@ async def _gerar_resposta_gemini_com_agenda(
 
     tool_agenda = types.Tool(function_declarations=[
         types.FunctionDeclaration(
+            name="buscar_horarios_livres",
+            description=(
+                "Consulta o Google Agenda e retorna os horários reais disponíveis para os próximos dias. "
+                "Use ANTES de sugerir horários ao lead para mostrar opções reais."
+            ),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "dias": types.Schema(type=types.Type.INTEGER, description="Quantos dias à frente verificar (padrão 2)"),
+                },
+                required=[],
+            ),
+        ),
+        types.FunctionDeclaration(
             name="criar_agendamento",
             description=(
                 "Cria um agendamento no Google Agenda quando o lead confirmar data e hora. "
@@ -54,7 +68,7 @@ async def _gerar_resposta_gemini_com_agenda(
                 },
                 required=["titulo", "data", "hora_inicio"],
             ),
-        )
+        ),
     ])
 
     config = types.GenerateContentConfig(
@@ -70,55 +84,77 @@ async def _gerar_resposta_gemini_com_agenda(
         config=config,
     )
 
-    # Verifica se Gemini quer chamar a função
-    candidate = resp.candidates[0] if resp.candidates else None
-    if not candidate:
-        return resp.text or ""
+    # Loop de function calling — pode encadear múltiplas chamadas
+    contents = [types.Content(role="user", parts=[types.Part(text=mensagem)])]
 
-    for part in candidate.content.parts:
-        if part.function_call:
+    for _ in range(5):  # máximo 5 rounds de tool use
+        candidate = resp.candidates[0] if resp.candidates else None
+        if not candidate:
+            break
+
+        fn_parts = [p for p in candidate.content.parts if p.function_call]
+        if not fn_parts:
+            break  # sem mais chamadas, retorna texto
+
+        # Adiciona resposta do modelo ao contexto
+        contents.append(types.Content(role="model", parts=candidate.content.parts))
+
+        # Executa cada função chamada
+        fn_responses = []
+        for part in fn_parts:
             fc = part.function_call
             args = dict(fc.args)
 
-            # Executa o agendamento em thread (biblioteca síncrona)
             try:
-                resultado = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: criar_evento(
-                        credentials_dict=calendar_creds,
-                        calendar_id=calendar_id,
-                        titulo=args.get("titulo", f"Reunião — {lead.get('nome', '')}"),
-                        data=args["data"],
-                        hora_inicio=args["hora_inicio"],
-                        duracao_minutos=int(args.get("duracao_minutos", 60)),
-                        descricao=args.get("descricao", ""),
-                        fuso=fuso,
+                if fc.name == "buscar_horarios_livres":
+                    slots = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: buscar_horarios_livres(
+                            credentials_dict=calendar_creds,
+                            calendar_id=calendar_id,
+                            fuso=fuso,
+                            dias=int(args.get("dias", 2)),
+                        )
                     )
-                )
-                fn_result = f"Agendamento criado com sucesso! Link: {resultado['link']}"
-            except Exception as e:
-                fn_result = f"Erro ao criar agendamento: {str(e)}"
+                    fn_result = f"Horários livres: {', '.join(slots)}" if slots else "Nenhum horário livre encontrado nos próximos dias."
 
-            # Envia resultado da função de volta ao Gemini para resposta final
-            resp2 = await client.aio.models.generate_content(
-                model=modelo,
-                contents=[
-                    types.Content(role="user", parts=[types.Part(text=mensagem)]),
-                    types.Content(role="model", parts=[types.Part(function_call=part.function_call)]),
-                    types.Content(role="user", parts=[
-                        types.Part(function_response=types.FunctionResponse(
-                            name=fc.name,
-                            response={"result": fn_result},
-                        ))
-                    ]),
-                ],
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=temperatura,
-                    max_output_tokens=max_tokens,
-                ),
-            )
-            return resp2.text or fn_result
+                elif fc.name == "criar_agendamento":
+                    resultado = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: criar_evento_calendar(
+                            credentials_dict=calendar_creds,
+                            calendar_id=calendar_id,
+                            titulo=args.get("titulo", f"Sessão Estratégica — {lead.get('nome', '')}"),
+                            data=args["data"],
+                            hora_inicio=args["hora_inicio"],
+                            duracao_minutos=int(args.get("duracao_minutos", 60)),
+                            descricao=args.get("descricao", ""),
+                            fuso=fuso,
+                        )
+                    )
+                    fn_result = f"Agendamento criado! Link: {resultado['link']}"
+                else:
+                    fn_result = "Função desconhecida."
+            except Exception as e:
+                fn_result = f"Erro: {str(e)}"
+
+            fn_responses.append(types.Part(function_response=types.FunctionResponse(
+                name=fc.name, response={"result": fn_result}
+            )))
+
+        contents.append(types.Content(role="user", parts=fn_responses))
+
+        # Continua a conversa com o resultado das funções
+        resp = await client.aio.models.generate_content(
+            model=modelo,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=temperatura,
+                max_output_tokens=max_tokens,
+                tools=[tool_agenda],
+            ),
+        )
 
     return resp.text or ""
 
