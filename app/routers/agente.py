@@ -111,6 +111,10 @@ async def receber_mensagem_evolution(request: Request):
 
     lead = lead_res.data[0] if lead_res.data else {"nome": numero, "telefone": numero, "dados_raw": {}}
 
+    # Verifica se agente está pausado
+    if config_ia.get("agente_pausado", False):
+        return {"ok": True, "ignorado": True, "motivo": "agente pausado"}
+
     # Verifica score mínimo
     score_minimo = int(config_ia.get("score_minimo", 10000))
     score = int(lead.get("score", 0) or 0)

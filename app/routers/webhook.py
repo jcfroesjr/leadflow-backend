@@ -161,7 +161,8 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
                         )
 
             # ── Mensagem para o lead ──────────────────────────────────────────
-            if telefone:
+            agente_pausado = config_ia.get("agente_pausado", False)
+            if telefone and not agente_pausado:
                 score_minimo = int(config_ia.get("score_minimo", 10000))
                 agente_ativo = score >= score_minimo
 
