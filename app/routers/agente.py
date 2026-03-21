@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from app.db.client import get_supabase
 from app.services.evolution import enviar_mensagem
 from app.services.llm import gerar_resposta
-from app.services.google_calendar import criar_evento_calendar, buscar_horarios_livres
+from app.services.google_calendar import criar_evento_calendar, buscar_horarios_livres, verificar_slot_livre
 
 router = APIRouter(tags=["agente"])
 
@@ -112,20 +112,47 @@ async def _gerar_resposta_openai_com_agenda(
                     )
                     fn_result = f"Horários livres: {', '.join(slots)}" if slots else "Nenhum horário livre nos próximos dias."
                 elif tc.function.name == "criar_agendamento":
-                    resultado = await asyncio.get_event_loop().run_in_executor(
+                    data_ev      = args["data"]
+                    hora_ev      = args["hora_inicio"]
+                    duracao_ev   = int(args.get("duracao_minutos", 60))
+                    slot_livre = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: criar_evento_calendar(
+                        lambda: verificar_slot_livre(
                             credentials_dict=calendar_creds,
                             calendar_id=calendar_id,
-                            titulo=args.get("titulo", f"Sessão Estratégica — {lead.get('nome', '')}"),
-                            data=args["data"],
-                            hora_inicio=args["hora_inicio"],
-                            duracao_minutos=int(args.get("duracao_minutos", 60)),
-                            descricao=args.get("descricao", ""),
+                            data=data_ev,
+                            hora_inicio=hora_ev,
+                            duracao_minutos=duracao_ev,
                             fuso=fuso,
                         )
                     )
-                    fn_result = f"Agendamento criado! Link: {resultado['link']}"
+                    if not slot_livre:
+                        slots = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: buscar_horarios_livres(
+                                credentials_dict=calendar_creds,
+                                calendar_id=calendar_id,
+                                fuso=fuso,
+                                dias=3,
+                            )
+                        )
+                        alternativas = ", ".join(slots) if slots else "nenhum horário livre nos próximos dias"
+                        fn_result = f"Horário {hora_ev} do dia {data_ev} já está ocupado na agenda. Horários disponíveis: {alternativas}"
+                    else:
+                        resultado = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: criar_evento_calendar(
+                                credentials_dict=calendar_creds,
+                                calendar_id=calendar_id,
+                                titulo=args.get("titulo", f"Sessão Estratégica — {lead.get('nome', '')}"),
+                                data=data_ev,
+                                hora_inicio=hora_ev,
+                                duracao_minutos=duracao_ev,
+                                descricao=args.get("descricao", ""),
+                                fuso=fuso,
+                            )
+                        )
+                        fn_result = f"Agendamento criado! Link: {resultado['link']}"
                 else:
                     fn_result = "Função não reconhecida."
             except Exception as e:

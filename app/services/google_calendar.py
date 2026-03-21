@@ -18,17 +18,40 @@ def _build_service(credentials_dict: dict):
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
+def _eventos_ocupados_do_dia(service, calendar_id: str, dia: datetime, hora_inicio: int, hora_fim: int, tz) -> list:
+    """Retorna lista de (inicio, fim) dos eventos ocupados em um dia."""
+    time_min = dia.replace(hour=hora_inicio, minute=0, second=0, microsecond=0)
+    time_max = dia.replace(hour=hora_fim,    minute=0, second=0, microsecond=0)
+    resp = service.events().list(
+        calendarId=calendar_id,
+        timeMin=time_min.isoformat(),
+        timeMax=time_max.isoformat(),
+        singleEvents=True,
+        orderBy="startTime",
+    ).execute()
+    ocupados = []
+    for ev in resp.get("items", []):
+        inicio_ev = ev.get("start", {}).get("dateTime")
+        fim_ev    = ev.get("end",   {}).get("dateTime")
+        if inicio_ev and fim_ev:
+            ocupados.append((
+                datetime.fromisoformat(inicio_ev).astimezone(tz),
+                datetime.fromisoformat(fim_ev).astimezone(tz),
+            ))
+    return ocupados
+
+
 def buscar_horarios_livres(
     credentials_dict: dict,
     calendar_id: str,
     fuso: str = "America/Sao_Paulo",
-    dias: int = 2,
+    dias: int = 3,
     hora_inicio_dia: int = 8,
     hora_fim_dia: int = 18,
     duracao_minutos: int = 60,
 ) -> list[str]:
     """
-    Retorna lista de horários livres para os próximos `dias` dias úteis,
+    Retorna lista de horários livres para os próximos `dias` dias ÚTEIS,
     no formato 'DD/MM HH:MM' (ex: '22/03 14:00').
     """
     service = _build_service(credentials_dict)
@@ -36,49 +59,55 @@ def buscar_horarios_livres(
     hoje = datetime.now(tz)
 
     slots_livres = []
-    dia_atual = hoje.replace(hour=0, minute=0, second=0, microsecond=0)
+    dias_uteis_vistos = 0
+    dia_atual = hoje.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)  # começa amanhã
 
-    for _ in range(dias):
+    while dias_uteis_vistos < dias and len(slots_livres) < 8:
         # Pula finais de semana
         if dia_atual.weekday() >= 5:
             dia_atual += timedelta(days=1)
             continue
 
-        time_min = dia_atual.replace(hour=hora_inicio_dia, minute=0)
-        time_max = dia_atual.replace(hour=hora_fim_dia, minute=0)
+        dias_uteis_vistos += 1
+        ocupados = _eventos_ocupados_do_dia(service, calendar_id, dia_atual, hora_inicio_dia, hora_fim_dia, tz)
 
-        # Busca eventos do dia
-        eventos_resp = service.events().list(
-            calendarId=calendar_id,
-            timeMin=time_min.isoformat(),
-            timeMax=time_max.isoformat(),
-            singleEvents=True,
-            orderBy="startTime",
-        ).execute()
+        slot = dia_atual.replace(hour=hora_inicio_dia, minute=0, second=0, microsecond=0)
+        time_max = dia_atual.replace(hour=hora_fim_dia, minute=0, second=0, microsecond=0)
 
-        ocupados = []
-        for ev in eventos_resp.get("items", []):
-            inicio_ev = ev.get("start", {}).get("dateTime")
-            fim_ev = ev.get("end", {}).get("dateTime")
-            if inicio_ev and fim_ev:
-                ocupados.append((
-                    datetime.fromisoformat(inicio_ev).astimezone(tz),
-                    datetime.fromisoformat(fim_ev).astimezone(tz),
-                ))
-
-        # Gera slots de 1h e verifica disponibilidade
-        slot = time_min
         while slot + timedelta(minutes=duracao_minutos) <= time_max:
             slot_fim = slot + timedelta(minutes=duracao_minutos)
             livre = all(slot_fim <= oc[0] or slot >= oc[1] for oc in ocupados)
-            # Não sugere horários já passados
-            if livre and slot > hoje:
+            if livre:
                 slots_livres.append(slot.strftime("%d/%m %H:%M"))
             slot += timedelta(minutes=60)
 
         dia_atual += timedelta(days=1)
 
-    return slots_livres[:8]  # máximo 8 opções
+    return slots_livres[:8]
+
+
+def verificar_slot_livre(
+    credentials_dict: dict,
+    calendar_id: str,
+    data: str,
+    hora_inicio: str,
+    duracao_minutos: int = 60,
+    fuso: str = "America/Sao_Paulo",
+) -> bool:
+    """Verifica se um slot específico está livre no Google Agenda."""
+    service = _build_service(credentials_dict)
+    tz = ZoneInfo(fuso)
+    inicio = datetime.strptime(f"{data} {hora_inicio}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+    fim = inicio + timedelta(minutes=duracao_minutos)
+
+    resp = service.events().list(
+        calendarId=calendar_id,
+        timeMin=inicio.isoformat(),
+        timeMax=fim.isoformat(),
+        singleEvents=True,
+    ).execute()
+
+    return len(resp.get("items", [])) == 0
 
 
 def criar_evento_calendar(
