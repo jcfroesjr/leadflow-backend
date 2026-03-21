@@ -87,6 +87,8 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
             telefones_notif = config_apis.get("notificacoes_telefones") or []
             if telefones_notif and evo_url and evo_key and evo_instancia:
                 score_fmt = f"{score:,}".replace(",", ".")
+                numero_limpo = "".join(filter(str.isdigit, telefone or ""))
+                wa_link = f"https://wa.me/{numero_limpo}" if numero_limpo else ""
                 texto_notif = (
                     f"🔔 *Novo lead recebido!*\n\n"
                     f"👤 *Nome:* {nome or '—'}\n"
@@ -94,6 +96,7 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
                     f"📧 *E-mail:* {email or '—'}\n"
                     f"⭐ *Score:* {score_fmt}\n"
                     f"📋 *Origem:* {wh.get('plataforma', 'webhook')}"
+                    + (f"\n\n💬 *Falar com o lead:*\n{wa_link}" if wa_link else "")
                 )
 
                 # Gera PDF com todos os dados do webhook
