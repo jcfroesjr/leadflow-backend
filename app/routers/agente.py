@@ -335,12 +335,16 @@ async def receber_mensagem_evolution(request: Request):
     # Nome da instância (para identificar a empresa)
     instancia = payload.get("instance", "")
 
-    sb = get_supabase()
+    try:
+        sb = get_supabase()
 
-    # Encontra empresa pela instância Evolution
-    empresa_res = sb.table("empresas") \
-        .select("id, nome, evolution_instancia, config_apis, config_ia") \
-        .execute()
+        # Encontra empresa pela instância Evolution
+        empresa_res = sb.table("empresas") \
+            .select("id, nome, evolution_instancia, config_apis, config_ia") \
+            .execute()
+    except Exception as e:
+        import traceback
+        return JSONResponse({"ok": False, "erro": f"Erro ao consultar empresas: {str(e)}", "trace": traceback.format_exc()}, status_code=500)
 
     empresa = None
     for e in (empresa_res.data or []):
@@ -464,24 +468,28 @@ async def receber_mensagem_evolution(request: Request):
 
     # Salva mensagens no histórico
     agora = datetime.utcnow().isoformat()
-    sb.table("conversas").insert([
-        {"empresa_id": empresa_id, "telefone": numero, "role": "user",      "conteudo": mensagem_entrada, "criado_em": agora},
-        {"empresa_id": empresa_id, "telefone": numero, "role": "assistant",  "conteudo": resposta,         "criado_em": agora},
-    ]).execute()
+    try:
+        sb.table("conversas").insert([
+            {"empresa_id": empresa_id, "telefone": numero, "role": "user",      "conteudo": mensagem_entrada, "criado_em": agora},
+            {"empresa_id": empresa_id, "telefone": numero, "role": "assistant",  "conteudo": resposta,         "criado_em": agora},
+        ]).execute()
+    except Exception as e:
+        import traceback
+        return JSONResponse({"ok": False, "erro": f"Erro ao salvar histórico: {str(e)}", "trace": traceback.format_exc()}, status_code=500)
 
     # Envia resposta via Evolution API
-    evo_url       = config_apis.get("evolution_url", "")
-    evo_key       = config_apis.get("evolution_key", "")
-    evo_instancia = empresa.get("evolution_instancia") or config_apis.get("evolution_instancia", "")
-
     import os
-    evo_url       = evo_url or os.getenv("EVOLUTION_API_URL", "").rstrip("/")
-    evo_key       = evo_key or os.getenv("EVOLUTION_API_KEY", "")
-    evo_instancia = evo_instancia or os.getenv("EVOLUTION_INSTANCIA", "")
+    evo_url       = config_apis.get("evolution_url", "") or os.getenv("EVOLUTION_API_URL", "").rstrip("/")
+    evo_key       = config_apis.get("evolution_key", "") or os.getenv("EVOLUTION_API_KEY", "")
+    evo_instancia = (empresa.get("evolution_instancia") or config_apis.get("evolution_instancia", "")) or os.getenv("EVOLUTION_INSTANCIA", "")
 
     envio = {}
-    if evo_url and evo_key and evo_instancia:
-        envio = await enviar_mensagem(evo_url, evo_key, evo_instancia, numero, resposta)
+    try:
+        if evo_url and evo_key and evo_instancia:
+            envio = await enviar_mensagem(evo_url, evo_key, evo_instancia, numero, resposta)
+    except Exception as e:
+        import traceback
+        return JSONResponse({"ok": False, "erro": f"Erro ao enviar WhatsApp: {str(e)}", "trace": traceback.format_exc()}, status_code=500)
 
     return {"ok": True, "resposta": resposta, "envio": envio}
 
