@@ -32,8 +32,9 @@ async def _gerar_resposta_gemini_com_agenda(
     from google import genai
     from google.genai import types
     import asyncio
+    import os
 
-    key = api_key or __import__("os").getenv("GEMINI_API_KEY", "")
+    key = api_key or os.getenv("GEMINI_API_KEY", "")
     client = genai.Client(api_key=key)
 
     tool_agenda = types.Tool(function_declarations=[
@@ -48,7 +49,6 @@ async def _gerar_resposta_gemini_com_agenda(
                 properties={
                     "dias": types.Schema(type=types.Type.INTEGER, description="Quantos dias à frente verificar (padrão 2)"),
                 },
-                required=[],
             ),
         ),
         types.FunctionDeclaration(
@@ -60,51 +60,52 @@ async def _gerar_resposta_gemini_com_agenda(
             parameters=types.Schema(
                 type=types.Type.OBJECT,
                 properties={
-                    "titulo":           types.Schema(type=types.Type.STRING,  description="Título do evento, ex: 'Sessão Estratégica — João Silva'"),
-                    "data":             types.Schema(type=types.Type.STRING,  description="Data no formato YYYY-MM-DD"),
-                    "hora_inicio":      types.Schema(type=types.Type.STRING,  description="Hora de início no formato HH:MM"),
-                    "duracao_minutos":  types.Schema(type=types.Type.INTEGER, description="Duração em minutos (padrão 60)"),
-                    "descricao":        types.Schema(type=types.Type.STRING,  description="Descrição com dados do lead"),
+                    "titulo":          types.Schema(type=types.Type.STRING,  description="Título do evento"),
+                    "data":            types.Schema(type=types.Type.STRING,  description="Data no formato YYYY-MM-DD"),
+                    "hora_inicio":     types.Schema(type=types.Type.STRING,  description="Hora de início no formato HH:MM"),
+                    "duracao_minutos": types.Schema(type=types.Type.INTEGER, description="Duração em minutos (padrão 60)"),
+                    "descricao":       types.Schema(type=types.Type.STRING,  description="Descrição com dados do lead"),
                 },
                 required=["titulo", "data", "hora_inicio"],
             ),
         ),
     ])
 
-    config = types.GenerateContentConfig(
+    cfg = types.GenerateContentConfig(
         system_instruction=system_prompt,
         temperature=temperatura,
         max_output_tokens=max_tokens,
         tools=[tool_agenda],
     )
 
-    resp = await client.aio.models.generate_content(
-        model=modelo,
-        contents=mensagem,
-        config=config,
-    )
-
-    # Loop de function calling — pode encadear múltiplas chamadas
     contents = [types.Content(role="user", parts=[types.Part(text=mensagem)])]
 
-    for _ in range(5):  # máximo 5 rounds de tool use
+    for _ in range(6):  # máximo 6 rounds (3 tool calls + respostas)
+        resp = await client.aio.models.generate_content(
+            model=modelo, contents=contents, config=cfg,
+        )
+
         candidate = resp.candidates[0] if resp.candidates else None
-        if not candidate:
+        if not candidate or not candidate.content or not candidate.content.parts:
             break
 
         fn_parts = [p for p in candidate.content.parts if p.function_call]
-        if not fn_parts:
-            break  # sem mais chamadas, retorna texto
 
-        # Adiciona resposta do modelo ao contexto
+        if not fn_parts:
+            # Sem function calls — extrai texto e retorna
+            for p in candidate.content.parts:
+                if hasattr(p, "text") and p.text:
+                    return p.text
+            break
+
+        # Adiciona resposta do modelo com as function calls ao contexto
         contents.append(types.Content(role="model", parts=candidate.content.parts))
 
-        # Executa cada função chamada
+        # Executa cada função e coleta resultados
         fn_responses = []
         for part in fn_parts:
             fc = part.function_call
-            args = dict(fc.args)
-
+            args = dict(fc.args) if fc.args else {}
             try:
                 if fc.name == "buscar_horarios_livres":
                     slots = await asyncio.get_event_loop().run_in_executor(
@@ -116,7 +117,7 @@ async def _gerar_resposta_gemini_com_agenda(
                             dias=int(args.get("dias", 2)),
                         )
                     )
-                    fn_result = f"Horários livres: {', '.join(slots)}" if slots else "Nenhum horário livre encontrado nos próximos dias."
+                    fn_result = f"Horários livres: {', '.join(slots)}" if slots else "Nenhum horário livre nos próximos dias."
 
                 elif fc.name == "criar_agendamento":
                     resultado = await asyncio.get_event_loop().run_in_executor(
@@ -132,31 +133,21 @@ async def _gerar_resposta_gemini_com_agenda(
                             fuso=fuso,
                         )
                     )
-                    fn_result = f"Agendamento criado! Link: {resultado['link']}"
+                    fn_result = f"Agendamento criado com sucesso! Link: {resultado['link']}"
                 else:
-                    fn_result = "Função desconhecida."
+                    fn_result = "Função não reconhecida."
             except Exception as e:
-                fn_result = f"Erro: {str(e)}"
+                fn_result = f"Erro ao executar função: {str(e)}"
 
-            fn_responses.append(types.Part(function_response=types.FunctionResponse(
-                name=fc.name, response={"result": fn_result}
-            )))
+            fn_responses.append(types.Part(
+                function_response=types.FunctionResponse(
+                    name=fc.name, response={"result": fn_result}
+                )
+            ))
 
         contents.append(types.Content(role="user", parts=fn_responses))
 
-        # Continua a conversa com o resultado das funções
-        resp = await client.aio.models.generate_content(
-            model=modelo,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=temperatura,
-                max_output_tokens=max_tokens,
-                tools=[tool_agenda],
-            ),
-        )
-
-    return resp.text or ""
+    return ""
 
 
 def _limpar_numero(numero: str) -> str:
