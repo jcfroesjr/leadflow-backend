@@ -299,29 +299,35 @@ async def receber_mensagem_evolution(request: Request):
 
     # Gera resposta — Gemini com function calling se agenda configurada
     resposta = ""
-    if prov == "gemini" and calendar_creds:
-        resposta = await _gerar_resposta_gemini_com_agenda(
-            modelo=modelo,
-            api_key=api_key,
-            system_prompt=prompt_sistema,
-            mensagem=mensagem_llm,
-            temperatura=float(config_ia.get("temperatura", 0.7)),
-            max_tokens=int(config_ia.get("max_tokens", 500)),
-            calendar_creds=calendar_creds,
-            calendar_id=calendar_id,
-            fuso=fuso,
-            lead=lead,
-        )
-    else:
-        resposta = await gerar_resposta(
-            modelo=modelo,
-            system_prompt=prompt_sistema,
-            mensagem=mensagem_llm,
-            api_key=api_key,
-            temperatura=float(config_ia.get("temperatura", 0.7)),
-            max_tokens=int(config_ia.get("max_tokens", 500)),
-            provider=prov,
-        )
+    try:
+        if prov == "gemini" and calendar_creds:
+            resposta = await _gerar_resposta_gemini_com_agenda(
+                modelo=modelo,
+                api_key=api_key,
+                system_prompt=prompt_sistema,
+                mensagem=mensagem_llm,
+                temperatura=float(config_ia.get("temperatura", 0.7)),
+                max_tokens=int(config_ia.get("max_tokens", 500)),
+                calendar_creds=calendar_creds,
+                calendar_id=calendar_id,
+                fuso=fuso,
+                lead=lead,
+            )
+        else:
+            resposta = await gerar_resposta(
+                modelo=modelo,
+                system_prompt=prompt_sistema,
+                mensagem=mensagem_llm,
+                api_key=api_key,
+                temperatura=float(config_ia.get("temperatura", 0.7)),
+                max_tokens=int(config_ia.get("max_tokens", 500)),
+                provider=prov,
+            )
+    except Exception as e:
+        return JSONResponse({"ok": False, "erro": f"Erro ao gerar resposta: {str(e)}"}, status_code=500)
+
+    if not resposta:
+        return {"ok": True, "ignorado": True, "motivo": "resposta vazia do LLM"}
 
     # Salva mensagens no histórico
     agora = datetime.utcnow().isoformat()
