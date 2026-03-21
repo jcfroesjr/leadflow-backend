@@ -99,16 +99,20 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
                     + (f"\n\n💬 *Falar com o lead:*\n{wa_link}" if wa_link else "")
                 )
 
-                # Gera PDF com todos os dados do webhook
-                pdf_b64 = gerar_pdf_lead(
-                    nome=nome,
-                    telefone=telefone,
-                    email=email,
-                    score=score,
-                    payload=payload,
-                    mapeamento=mapa,
-                    empresa_nome=empresa_nome,
-                )
+                # Gera PDF com os dados mapeados
+                try:
+                    pdf_b64 = gerar_pdf_lead(
+                        nome=nome,
+                        telefone=telefone,
+                        email=email,
+                        score=score,
+                        payload=payload,
+                        mapeamento=mapa,
+                        empresa_nome=empresa_nome,
+                    )
+                except Exception:
+                    pdf_b64 = None
+
                 nome_arquivo = f"lead_{(nome or 'desconhecido').replace(' ', '_')}.pdf"
 
                 for tel in telefones_notif:
@@ -117,12 +121,13 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
                         continue
                     # 1. Mensagem de texto com resumo
                     await enviar_mensagem(evo_url, evo_key, evo_instancia, tel, texto_notif)
-                    # 2. PDF com respostas completas
-                    await enviar_documento(
-                        evo_url, evo_key, evo_instancia, tel,
-                        pdf_b64, nome_arquivo,
-                        caption="📎 Respostas completas do formulário",
-                    )
+                    # 2. PDF com respostas (se gerado com sucesso)
+                    if pdf_b64:
+                        await enviar_documento(
+                            evo_url, evo_key, evo_instancia, tel,
+                            pdf_b64, nome_arquivo,
+                            caption="Respostas completas do formulario",
+                        )
 
             # ── Mensagem para o lead ──────────────────────────────────────────
             if telefone:
