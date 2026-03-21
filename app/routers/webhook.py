@@ -46,9 +46,22 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
         telefone = payload.get(mapa.get("telefone", "telefone"), payload.get("telefone", ""))
         email    = payload.get(mapa.get("email",    "email"),    payload.get("email",    ""))
 
-        # Lê score do payload (campo "score" ou mapeado)
-        campo_score = mapa.get("score", "score")
-        score_raw   = payload.get(campo_score, payload.get("score", 0))
+        # Lê score do payload — busca case-insensitive no mapeamento
+        mapa_lower  = {k.lower(): v for k, v in mapa.items()}
+        campo_score = mapa_lower.get("score", "score")
+        # Suporte a notação de ponto (ex: respondent.score)
+        def _get_nested(obj, path):
+            if not path:
+                return None
+            if path in obj:
+                return obj[path]
+            for parte in path.split("."):
+                if isinstance(obj, dict) and parte in obj:
+                    obj = obj[parte]
+                else:
+                    return None
+            return obj
+        score_raw = _get_nested(payload, campo_score) or payload.get("score", 0)
         try:
             score = int(float(str(score_raw)))
         except (ValueError, TypeError):
