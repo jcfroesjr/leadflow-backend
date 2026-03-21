@@ -2,7 +2,7 @@ import traceback
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.routers import webhook, leads, configuracoes, agente, agenda
+from app.routers import webhook, leads, configuracoes, agente, agenda, agendamentos
 
 app = FastAPI(title="LeadFlow API", version="1.0.0")
 
@@ -26,6 +26,7 @@ app.include_router(leads.router)
 app.include_router(configuracoes.router)
 app.include_router(agente.router)
 app.include_router(agenda.router)
+app.include_router(agendamentos.router)
 
 @app.get("/health")
 async def health():
