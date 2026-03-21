@@ -40,28 +40,39 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
 
         wh = result.data[0]
 
-        # Mapeia campos usando mapeamento configurado
-        mapa     = wh.get("mapeamento_campos") or {}
-        nome     = payload.get(mapa.get("nome",     "nome"),     payload.get("nome",     ""))
-        telefone = payload.get(mapa.get("telefone", "telefone"), payload.get("telefone", ""))
-        email    = payload.get(mapa.get("email",    "email"),    payload.get("email",    ""))
-
-        # Lê score do payload — busca case-insensitive no mapeamento
-        mapa_lower  = {k.lower(): v for k, v in mapa.items()}
-        campo_score = mapa_lower.get("score", "score")
-        # Suporte a notação de ponto (ex: respondent.score)
+        # Resolve valores aninhados via notação de ponto (ex: respondent.answers.Nome)
         def _get_nested(obj, path):
             if not path:
                 return None
             if path in obj:
                 return obj[path]
+            atual = obj
             for parte in path.split("."):
-                if isinstance(obj, dict) and parte in obj:
-                    obj = obj[parte]
+                if isinstance(atual, dict) and parte in atual:
+                    atual = atual[parte]
                 else:
                     return None
-            return obj
-        score_raw = _get_nested(payload, campo_score) or payload.get("score", 0)
+            return atual
+
+        def _extrair(campo_chave, fallback):
+            mapa_lower = {k.lower(): v for k, v in mapa.items()}
+            caminho = mapa_lower.get(campo_chave.lower())
+            if caminho:
+                val = _get_nested(payload, caminho)
+                if val is not None:
+                    return str(val)
+            return payload.get(fallback, "")
+
+        # Mapeia campos usando mapeamento configurado
+        mapa     = wh.get("mapeamento_campos") or {}
+        nome     = _extrair("nome",     "nome")
+        telefone = _extrair("telefone", "telefone")
+        email    = _extrair("email",    "email")
+
+        # Score — busca case-insensitive e resolve caminho aninhado
+        mapa_lower  = {k.lower(): v for k, v in mapa.items()}
+        campo_score = mapa_lower.get("score", "score")
+        score_raw   = _get_nested(payload, campo_score) or payload.get("score", 0)
         try:
             score = int(float(str(score_raw)))
         except (ValueError, TypeError):
