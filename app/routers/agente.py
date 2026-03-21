@@ -101,13 +101,15 @@ async def _gerar_resposta_openai_com_agenda(
             args = _json.loads(tc.function.arguments or "{}")
             try:
                 if tc.function.name == "buscar_horarios_livres":
+                    _cvf = calendars_verificar
                     slots = await asyncio.get_event_loop().run_in_executor(
                         None,
                         lambda: buscar_horarios_livres(
                             credentials_dict=calendar_creds,
                             calendar_id=calendar_id,
+                            calendars_verificar=_cvf,
                             fuso=fuso,
-                            dias=int(args.get("dias", 2)),
+                            dias=int(args.get("dias", 3)),
                         )
                     )
                     fn_result = f"Horários livres: {', '.join(slots)}" if slots else "Nenhum horário livre nos próximos dias."
@@ -115,11 +117,13 @@ async def _gerar_resposta_openai_com_agenda(
                     data_ev      = args["data"]
                     hora_ev      = args["hora_inicio"]
                     duracao_ev   = int(args.get("duracao_minutos", 60))
+                    _cvf2 = calendars_verificar
                     slot_livre = await asyncio.get_event_loop().run_in_executor(
                         None,
                         lambda: verificar_slot_livre(
                             credentials_dict=calendar_creds,
                             calendar_id=calendar_id,
+                            calendars_verificar=_cvf2,
                             data=data_ev,
                             hora_inicio=hora_ev,
                             duracao_minutos=duracao_ev,
@@ -127,11 +131,13 @@ async def _gerar_resposta_openai_com_agenda(
                         )
                     )
                     if not slot_livre:
+                        _cvf3 = calendars_verificar
                         slots = await asyncio.get_event_loop().run_in_executor(
                             None,
                             lambda: buscar_horarios_livres(
                                 credentials_dict=calendar_creds,
                                 calendar_id=calendar_id,
+                                calendars_verificar=_cvf3,
                                 fuso=fuso,
                                 dias=3,
                             )
@@ -444,9 +450,10 @@ async def receber_mensagem_evolution(request: Request):
     api_key = provider_map.get(prov, "")
 
     # Configurações do Google Agenda
-    calendar_creds = config_apis.get("google_calendar_credentials")
-    calendar_id    = config_apis.get("google_calendar_id", "primary")
-    fuso           = empresa.get("fuso") or "America/Sao_Paulo"
+    calendar_creds      = config_apis.get("google_calendar_credentials")
+    calendar_id         = config_apis.get("google_calendar_id", "primary")
+    calendars_verificar = config_apis.get("google_calendars_verificar") or []
+    fuso                = empresa.get("fuso") or "America/Sao_Paulo"
 
     # Gera resposta — Gemini com function calling se agenda configurada
     resposta = ""
