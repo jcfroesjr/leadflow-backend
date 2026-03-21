@@ -3,7 +3,7 @@ import os
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from app.db.client import get_supabase
-from app.services.evolution import enviar_mensagem, enviar_documento
+from app.services.evolution import enviar_mensagem, enviar_documento, enviar_contato
 from app.services.pdf_generator import gerar_pdf_lead
 
 router = APIRouter(tags=["webhook"])
@@ -152,6 +152,12 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
                             evo_url, evo_key, evo_instancia, tel,
                             pdf_b64, nome_arquivo,
                             caption="",
+                        )
+                    # 3. Cartão de contato do lead (toque para iniciar conversa)
+                    if telefone:
+                        await enviar_contato(
+                            evo_url, evo_key, evo_instancia,
+                            tel, nome or telefone, telefone,
                         )
 
             # ── Mensagem para o lead ──────────────────────────────────────────
