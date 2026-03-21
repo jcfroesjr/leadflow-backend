@@ -124,8 +124,6 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
                     f"⭐ *Score:* {score_fmt}",
                     f"📋 *Origem:* {wh.get('nome') or wh.get('plataforma', 'webhook')}",
                 ]
-                if wa_link:
-                    linhas.append(f"\n💬 *Falar com o lead:*\n{wa_link}")
                 texto_notif = "\n".join(linhas)
 
                 # Gera PDF com os dados mapeados
@@ -155,7 +153,7 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
                         await enviar_documento(
                             evo_url, evo_key, evo_instancia, tel,
                             pdf_b64, nome_arquivo,
-                            caption="Respostas completas do formulario",
+                            caption="",
                         )
 
             # ── Mensagem para o lead ──────────────────────────────────────────
