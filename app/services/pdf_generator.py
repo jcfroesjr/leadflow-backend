@@ -20,11 +20,16 @@ def _get_valor(payload: dict, campo: str):
     if campo in payload:
         return payload[campo]
     atual = payload
-    for parte in campo.split("."):
-        if isinstance(atual, dict) and parte in atual:
+    partes = campo.split(".")
+    for i, parte in enumerate(partes):
+        if not isinstance(atual, dict):
+            return None
+        if parte in atual:
             atual = atual[parte]
         else:
-            return None
+            # Campo pode ter pontos no texto — tenta o restante como chave única
+            chave_restante = ".".join(partes[i:])
+            return atual.get(chave_restante)
     return atual
 
 

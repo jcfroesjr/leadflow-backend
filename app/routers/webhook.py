@@ -47,11 +47,16 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
             if path in obj:
                 return obj[path]
             atual = obj
-            for parte in path.split("."):
-                if isinstance(atual, dict) and parte in atual:
+            partes = path.split(".")
+            for i, parte in enumerate(partes):
+                if not isinstance(atual, dict):
+                    return None
+                if parte in atual:
                     atual = atual[parte]
                 else:
-                    return None
+                    # Pergunta pode ter pontos no texto — tenta o restante como chave única
+                    chave_restante = ".".join(partes[i:])
+                    return atual.get(chave_restante)
             return atual
 
         def _extrair(campo_chave, fallback):
