@@ -71,7 +71,7 @@ async def receber_webhook(empresa_id: str, token: str, request: Request):
         # Mapeia campos usando mapeamento configurado
         mapa     = wh.get("mapeamento_campos") or {}
         nome     = _extrair("nome",     "nome")
-        telefone = _extrair("telefone", "telefone")
+        telefone = "".join(filter(str.isdigit, _extrair("telefone", "telefone")))
         email    = _extrair("email",    "email")
 
         # Score — busca case-insensitive e resolve caminho aninhado
